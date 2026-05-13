@@ -5,10 +5,21 @@ import { ResumePreview } from '../components/ResumePreview'
 import { ResumeImporter } from '../components/ResumeImporter'
 import { isSampleVisualHintsActive } from '../lib/builtInSample'
 import { createDefaultResume, withExtraColumnDefaults } from '../lib/defaultResume'
-import { isValidSlug, normalizeSlug } from '../lib/slug'
-import { loadDraft, publishResume, saveDraft, slugAvailable } from '../lib/storage'
+import { loadDraft, saveDraft } from '../lib/storage'
 import { parseTemplateId, TEMPLATE_LIST } from '../lib/templatesMeta'
 import type { ResumeData, TemplateId } from '../types/resume'
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+}
+
+/** Chrome / Edge use the print document title as the default “Save as PDF” file name. */
+function pdfDocumentTitle(data: ResumeData): string {
+  const raw = data.fullName.trim()
+  const name = raw.replace(/[/\\:*?"<>|]+/g, '').replace(/\s+/g, ' ').trim()
+  const base = name || 'Resume'
+  return `${base} Resume`
+}
 
 function BuilderActionBar({
   saveStatus,
@@ -62,9 +73,6 @@ export function Builder() {
   )
   const [showImportUndo, setShowImportUndo] = useState(false)
   const importUndoBaselineRef = useRef<ResumeData | null>(null)
-  const [slug, setSlug] = useState('')
-  const [publishMsg, setPublishMsg] = useState<string | null>(null)
-  const [lastUrl, setLastUrl] = useState<string | null>(null)
   const [saveStatus, setSaveStatus] = useState<'saving' | 'saved'>('saved')
   const skipSavingFlash = useRef(true)
   const dataRef = useRef(data)
@@ -95,34 +103,12 @@ export function Builder() {
     }
   }, [templateId, data])
 
-  const saveNow = useCallback(() => {
-    saveDraft(templateId, data)
-    setSaveStatus('saved')
-  }, [templateId, data])
-
-  const onResumeImported = useCallback(
-    (imported: ResumeData, { previousDraft }: { previousDraft: ResumeData }) => {
-      importUndoBaselineRef.current = withExtraColumnDefaults(structuredClone(previousDraft))
-      setShowImportUndo(true)
-      setData(withExtraColumnDefaults(structuredClone(imported)))
-    },
-    [],
-  )
-
-  const onUndoResumeImport = useCallback(() => {
-    const baseline = importUndoBaselineRef.current
-    if (baseline) setData(withExtraColumnDefaults(structuredClone(baseline)))
-    importUndoBaselineRef.current = null
-    setShowImportUndo(false)
-  }, [])
-
   const getDraftSnapshotForImport = useCallback(
     () => withExtraColumnDefaults(structuredClone(dataRef.current)),
     [],
   )
 
-  const downloadPdf = useCallback(() => {
-    // Collect all stylesheets accessible from this origin
+  const openResumePdfPrint = useCallback((pdfTitle: string) => {
     const cssLinks = Array.from(document.querySelectorAll<HTMLLinkElement>('link[rel="stylesheet"]'))
       .map((l) => l.href)
       .filter(Boolean)
@@ -132,15 +118,24 @@ export function Builder() {
       .join('\n')
 
     const resumeEl = document.getElementById('resume-print-root')
-    if (!resumeEl) {
+
+    const fallbackPrint = () => {
+      const prev = document.title
+      document.title = pdfTitle
       window.print()
+      window.setTimeout(() => {
+        document.title = prev
+      }, 2_000)
+    }
+
+    if (!resumeEl) {
+      fallbackPrint()
       return
     }
 
     const pw = window.open('', '_blank', 'width=900,height=1200')
     if (!pw) {
-      // Popup blocked — fall back to whole-page print
-      window.print()
+      fallbackPrint()
       return
     }
 
@@ -148,6 +143,7 @@ export function Builder() {
 <html lang="en">
 <head>
   <meta charset="utf-8" />
+  <title>${escapeHtml(pdfTitle)}</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   ${cssLinks.map((h) => `<link rel="stylesheet" href="${h}">`).join('\n  ')}
   <style>
@@ -168,35 +164,46 @@ export function Builder() {
 <body>${resumeEl.outerHTML}</body>
 </html>`)
     pw.document.close()
-    // Give fonts/images a moment to load, then print and close
     pw.onload = () => {
       pw.focus()
       pw.print()
       pw.close()
     }
-    // Fallback if onload never fires (e.g. no external resources)
     setTimeout(() => {
-      try { pw.print(); pw.close() } catch { /* already closed */ }
+      try {
+        pw.print()
+        pw.close()
+      } catch {
+        /* already closed */
+      }
     }, 1200)
   }, [])
 
-  const onPublish = useCallback(() => {
-    setPublishMsg(null)
-    setLastUrl(null)
-    const s = normalizeSlug(slug)
-    if (!isValidSlug(s)) {
-      setPublishMsg('Use a slug of 3–40 characters: lowercase letters, numbers, and single hyphens between words.')
-      return
-    }
-    if (!slugAvailable(s)) {
-      setPublishMsg('That slug is already taken on this browser. Try another.')
-      return
-    }
-    publishResume(s, templateId, data)
-    const url = `${window.location.origin}/site/${s}`
-    setLastUrl(url)
-    setPublishMsg('Published! Share your new resume page below.')
-  }, [slug, templateId, data])
+  const saveNow = useCallback(() => {
+    saveDraft(templateId, data)
+    setSaveStatus('saved')
+    openResumePdfPrint(pdfDocumentTitle(data))
+  }, [templateId, data, openResumePdfPrint])
+
+  const downloadPdfOnly = useCallback(() => {
+    openResumePdfPrint(pdfDocumentTitle(dataRef.current))
+  }, [openResumePdfPrint])
+
+  const onResumeImported = useCallback(
+    (imported: ResumeData, { previousDraft }: { previousDraft: ResumeData }) => {
+      importUndoBaselineRef.current = withExtraColumnDefaults(structuredClone(previousDraft))
+      setShowImportUndo(true)
+      setData(withExtraColumnDefaults(structuredClone(imported)))
+    },
+    [],
+  )
+
+  const onUndoResumeImport = useCallback(() => {
+    const baseline = importUndoBaselineRef.current
+    if (baseline) setData(withExtraColumnDefaults(structuredClone(baseline)))
+    importUndoBaselineRef.current = null
+    setShowImportUndo(false)
+  }, [])
 
   return (
     <div className="mx-auto max-w-[1400px] px-4 py-8 md:px-6 md:py-10 print:max-w-none print:p-0 print:m-0">
@@ -222,18 +229,20 @@ export function Builder() {
           <BuilderActionBar
             saveStatus={saveStatus}
             onSaveNow={saveNow}
-            onDownloadPdf={downloadPdf}
+            onDownloadPdf={downloadPdfOnly}
             className="shrink-0 border-t border-slate-200/80 pt-4 lg:border-t-0 lg:pt-0"
           />
         </div>
         <p className="text-xs text-slate-500 print:hidden">
-          <span className="font-medium text-slate-700">Download PDF</span> opens the print dialog — choose “Save as PDF” to download.
+          <span className="font-medium text-slate-700">Save now</span> saves your draft and opens print — in Chrome choose “Save as PDF”; the
+          suggested file name uses your <span className="font-medium">Full name</span> (e.g. Muktesh Resume).{' '}
+          <span className="font-medium text-slate-700">Download PDF</span> opens print without saving again.
         </p>
       </div>
 
       <div className="mt-8 grid gap-8 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.05fr)] print:block">
 
-        {/* ── Left column: import + publish + form ── */}
+        {/* ── Left column: import + form ── */}
         <div className="space-y-5 print:hidden">
 
           <ResumeImporter
@@ -242,46 +251,6 @@ export function Builder() {
             canUndoImport={showImportUndo}
             onUndoImport={onUndoResumeImport}
           />
-
-          {/* Publish */}
-          <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
-            <h2 className="text-sm font-semibold text-slate-900">Publish resume website</h2>
-            <p className="mt-1 text-xs text-slate-500">
-              Creates a public page at{' '}
-              <span className="rounded bg-slate-100 px-1 font-mono text-slate-700">/site/your-slug</span>{' '}
-              stored in this browser.
-            </p>
-            <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center">
-              <input
-                value={slug}
-                onChange={(e) => setSlug(e.target.value)}
-                placeholder="your-name"
-                className="min-w-0 flex-1 rounded-xl border border-slate-200 px-3 py-2 text-sm outline-none focus:border-indigo-300 focus:ring-4 focus:ring-indigo-500/15"
-              />
-              <button
-                type="button"
-                onClick={onPublish}
-                className="rounded-full bg-indigo-600 px-5 py-2 text-sm font-semibold text-white hover:bg-indigo-500"
-              >
-                Publish
-              </button>
-            </div>
-            {publishMsg && (
-              <p className={`mt-3 text-xs ${lastUrl ? 'text-green-700' : 'text-slate-600'}`}>{publishMsg}</p>
-            )}
-            {lastUrl && (
-              <div className="mt-2 flex flex-col gap-2 rounded-xl bg-indigo-50 px-3 py-3 text-xs text-indigo-950 sm:flex-row sm:items-center sm:justify-between">
-                <span className="break-all font-mono">{lastUrl}</span>
-                <button
-                  type="button"
-                  className="shrink-0 rounded-full bg-indigo-600 px-3 py-1.5 font-semibold text-white hover:bg-indigo-500"
-                  onClick={() => navigator.clipboard.writeText(lastUrl)}
-                >
-                  Copy
-                </button>
-              </div>
-            )}
-          </div>
 
           {/* Form */}
           <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
@@ -310,11 +279,11 @@ export function Builder() {
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <p className="max-w-xl text-sm text-slate-600">
             <span className="font-semibold text-slate-800">Draft status:</span>{' '}
-            {saveStatus === 'saving' ? 'Saving your changes…' : 'Everything is saved in this browser.'} Use{' '}
-            <span className="font-medium text-slate-800">Save now</span> after big edits, or{' '}
-            <span className="font-medium text-slate-800">Download PDF</span> to export (print dialog → Save as PDF).
+            {saveStatus === 'saving' ? 'Saving your changes…' : 'Everything is saved in this browser.'}{' '}
+            <span className="font-medium text-slate-800">Save now</span> also opens Chrome print with a file name from your full name;{' '}
+            <span className="font-medium text-slate-800">Download PDF</span> is print only.
           </p>
-          <BuilderActionBar saveStatus={saveStatus} onSaveNow={saveNow} onDownloadPdf={downloadPdf} />
+          <BuilderActionBar saveStatus={saveStatus} onSaveNow={saveNow} onDownloadPdf={downloadPdfOnly} />
         </div>
       </footer>
     </div>
