@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+
+# Published user pages are local-only / not meant for global indexing
+Disallow: /site/
+
+Sitemap: https://resumebuilder.fun/sitemap.xml
